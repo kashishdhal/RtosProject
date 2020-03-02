@@ -89,7 +89,7 @@ struct semaphore
 } semaphores[MAX_SEMAPHORES];
 uint8_t semaphoreCount = 0;
 
-struct semaphore *keyPressed, *keyReleased, *flashReq, *resource;
+struct semaphore *keyPressed, *keyReleased, *flashReq, *resource, *s;
 
 // task
 #define STATE_INVALID    0 // no task
@@ -182,9 +182,7 @@ bool createThread(_fn fn, const char name[], uint8_t priority, uint32_t stackByt
             tcb[i].sp = &stack[i][512];
             tcb[i].priority = priority;
             tcb[i].currentPriority = priority;
-
             strcpy(tcb[i].name,name);
-
 
             // increment task count
             taskCount++;
@@ -223,22 +221,22 @@ struct semaphore* createSemaphore(uint8_t count)
 }
 
 extern void setSp(uint32_t sp);
-extern void setPsp(uint32_t sp);
+extern void setPsp(uint32_t *);
 extern void turnPspOn();
-extern void callSvc();
 extern void pushReg();
 extern void popReg();
 extern uint32_t* getPsp();
+extern uint32_t getSvcNo();
+extern uint32_t getR0();
 
 
-void yield();
 
 // REQUIRED: modify this function to start the operating system, using all created tasks
 void startRtos()
 {
     turnPspOn();
     taskCurrent = rtosScheduler();
-    setPsp((uint32_t)tcb[taskCurrent].sp);
+    setPsp(tcb[taskCurrent].sp);
     _fn fn = (_fn)tcb[taskCurrent].pid;
     (*fn)();
 }
@@ -247,7 +245,7 @@ void startRtos()
 // push registers, call scheduler, pop registers, return to new function
 void yield()
 {
-    callSvc();
+   __asm(" SVC #1 ");
 }
 
 // REQUIRED: modify this function to support 1ms system timer
@@ -256,49 +254,66 @@ void yield()
 // return to new function (separate unrun or ready processing)
 void sleep(uint32_t tick)
 {
+    __asm(" SVC #2 ");
 }
 
 // REQUIRED: modify this function to wait a semaphore with priority inheritance
 // return if avail (separate unrun or ready processing), else yield to scheduler using pendsv
 void wait(struct semaphore *pSemaphore)
 {
+    __asm(" SVC #3 ");
 }
 
 // REQUIRED: modify this function to signal a semaphore is available using pendsv
 void post(struct semaphore *pSemaphore)
 {
+    __asm(" SVC #4 ");
 }
 
 // REQUIRED: modify this function to add support for the system timer
 // REQUIRED: in preemptive code, add code to request task switch
 void systickIsr()
 {
+    uint8_t i;
+    for (i=0; i<taskCount;i++)
+    {
+        if (tcb[i].state==STATE_DELAYED & tcb[i].ticks>0)
+            {
+                tcb[i].ticks--;
+            }
+            else if(tcb[i].state==STATE_DELAYED & tcb[i].ticks==0)
+            {
+                tcb[i].state=STATE_READY;
+            }
+
+    }
+    TIMER1_ICR_R = TIMER_ICR_TATOCINT;               // clear interrupt flag
 }
 
 // REQUIRED: in coop and preemptive, modify this function to add support for task switching
 // REQUIRED: process UNRUN and READY tasks differently
 void pendSvIsr()
 {
-    BLUE_LED = 1;
-    waitMicrosecond(1000);
-    BLUE_LED = 0;
     pushReg();
     tcb[taskCurrent].sp = getPsp();
     taskCurrent = rtosScheduler();
 
     if (tcb[taskCurrent].state == STATE_READY)
        {
-        setPsp((uint32_t)tcb[taskCurrent].sp);
+        setPsp(tcb[taskCurrent].sp);
         popReg();
        }
     else
     {
-        tcb[taskCurrent].sp = getPsp();
-        uint32_t *fn2;
-        *(&fn2-1) = (uint32_t)(1<<24);
-        fn2;
-        *(&fn2-6) = (uint32_t)tcb[taskCurrent].pid;
-        fn2;
+        uint32_t *p = getPsp();
+        p=p-1;
+        *p = (1<<24);
+        p=p-1;
+        *p = (uint32_t)tcb[taskCurrent].pid;
+        p = p-6;
+        tcb[taskCurrent].state = STATE_READY;
+        setPsp(p);
+
     }
 
 
@@ -309,7 +324,39 @@ void pendSvIsr()
 // REQUIRED: in preemptive code, add code to handle synchronization primitives
 void svCallIsr()
 {
-    NVIC_INT_CTRL_R = NVIC_INT_CTRL_PEND_SV;
+
+    uint8_t N = (uint8_t)getSvcNo();
+    //uint32_t* s = (uint32_t*)getR0();
+    uint32_t* R0 = (uint32_t*)getR0();
+
+
+    switch(N)
+    {
+    case 1: //yield
+        NVIC_INT_CTRL_R = NVIC_INT_CTRL_PEND_SV;
+        break;
+
+    case 2: //sleep
+        tcb[taskCurrent].state = STATE_DELAYED;
+        tcb[taskCurrent].ticks = *R0; //getR0();
+        NVIC_INT_CTRL_R = NVIC_INT_CTRL_PEND_SV;
+        break;
+    case 3: // wait
+
+        s = (struct semaphore *)*R0;
+        if(s->count>0)
+        {
+            s->count--;
+        }
+        else
+        {
+            s->processQueue[semaphoreCount] = taskCurrent;
+            tcb[taskCurrent].state = STATE_BLOCKED;
+            *semaphores = *s;
+        }
+        NVIC_INT_CTRL_R = NVIC_INT_CTRL_PEND_SV;
+        break;
+    }
 }
 
 //-----------------------------------------------------------------------------
@@ -327,7 +374,7 @@ void initHw()
 
        // Set GPIO ports to use APB (not needed since default configuration -- for clarity)
        // Note UART on port A must use APB
-      SYSCTL_GPIOHBCTL_R = 0;
+       SYSCTL_GPIOHBCTL_R = 0;
 
        // Enable GPIO port A C D F E peripherals
        SYSCTL_RCGC2_R |= SYSCTL_RCGC2_GPIOA | SYSCTL_RCGC2_GPIOC | SYSCTL_RCGC2_GPIOD | SYSCTL_RCGC2_GPIOF | SYSCTL_RCGC2_GPIOE;
@@ -354,6 +401,18 @@ void initHw()
         // Configure Push Buttons 4-5 ON PD6 AND PD7
         GPIO_PORTD_DEN_R |= PB4_MASK | PB5_MASK; // enable push buttons
         GPIO_PORTD_PUR_R |= PB4_MASK | PB5_MASK; // enable internal pull-up for push button
+
+
+        // Configure Timer 1 as the systickIsr
+
+        SYSCTL_RCGCTIMER_R |= SYSCTL_RCGCTIMER_R1; // Enable clocks
+        TIMER1_CTL_R &= ~TIMER_CTL_TAEN;                 // turn-off timer before reconfiguring
+        TIMER1_CFG_R = TIMER_CFG_32_BIT_TIMER;           // configure as 32-bit timer (A+B)
+        TIMER1_TAMR_R = TIMER_TAMR_TAMR_PERIOD;          // configure for periodic mode (count down)
+        TIMER1_TAILR_R = 40000;                       // set load value to 40e3 for 1 KHz interrupt rate
+        TIMER1_IMR_R = TIMER_IMR_TATOIM;                 // turn-on interrupts
+        NVIC_EN0_R |= 1 << (INT_TIMER1A-16);             // turn-on interrupt 37 (TIMER1A)
+        TIMER1_CTL_R |= TIMER_CTL_TAEN;                  // turn-on timer
 
 }
 
@@ -559,20 +618,19 @@ int main(void)
 
     // Add required idle process at lowest priority
     ok =  createThread(idle, "Idle", 15, 1024);
-    ok &=  createThread(idle2, "Idle2", 15, 1024);
+//    ok &=  createThread(idle2, "Idle2", 15, 1024);
 
     // Add other processes
-    /*
-    ok &= createThread(lengthyFn, "LengthyFn", 12, 1024);
-    ok &= createThread(flash4Hz, "Flash4Hz", 8, 1024);
-    ok &= createThread(oneshot, "OneShot", 4, 1024);
-    ok &= createThread(readKeys, "ReadKeys", 12, 1024);
-    ok &= createThread(debounce, "Debounce", 12, 1024);
-    ok &= createThread(important, "Important", 0, 1024);
-    ok &= createThread(uncooperative, "Uncoop", 10, 1024);
-    ok &= createThread(shell, "Shell", 8, 1024);
 
-*/
+//    ok &= createThread(lengthyFn, "LengthyFn", 12, 1024);
+    ok &= createThread(flash4Hz, "Flash4Hz", 8, 1024);
+//    ok &= createThread(oneshot, "OneShot", 4, 1024);
+//    ok &= createThread(readKeys, "ReadKeys", 12, 1024);
+//    ok &= createThread(debounce, "Debounce", 12, 1024);
+//    ok &= createThread(important, "Important", 0, 1024);
+//    ok &= createThread(uncooperative, "Uncoop", 10, 1024);
+//    ok &= createThread(shell, "Shell", 8, 1024);
+
 
     // Start up RTOS
     if (ok)

@@ -24,10 +24,11 @@
    .def setSp
    .def setPsp
    .def turnPspOn
-   .def callSvc
    .def pushReg
    .def popReg
    .def getPsp
+   .def getSvcNo
+   .def getR0
 
 
 ;-----------------------------------------------------------------------------
@@ -58,9 +59,6 @@ turnPspOn:
                MRS SP, MSP
                ISB	         ;
                BX     LR                     ; return from subroutine
-callSvc:
-	           SVC #100
-	           BX LR
 pushReg:
 	           MRS R0, PSP
 	           STR R4, [R0]
@@ -102,4 +100,16 @@ popReg:
 getPsp:
 	           MRS R0, PSP
 	           BX LR
+getSvcNo:
+			   MRS R0, PSP
+			   ADD R0, R0, #24
+			   LDR R0, [R0]
+			   SUB R0, #2
+			   LDR R0, [R0]
+			   AND R0, #15
+			   BX LR
+getR0:
+			   MRS R0, PSP
+;			   LDR R0, [R0]
+			   BX LR
 .endm
