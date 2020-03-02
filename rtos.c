@@ -34,10 +34,7 @@
 // PB3:    PC7
 // PB4:    PD6
 // PB5:    PD7
-// UART Interface:
-//   U0TX (PA1) and U0RX (PA0) are connected to the 2nd controller
-//   The USB on the 2nd controller enumerates to an ICDI interface and a virtual COM port
-//   Configured to 115,200 baud, 8N1
+
 
 //-----------------------------------------------------------------------------
 // Device includes, defines, and assembler directives
@@ -69,6 +66,14 @@
 #define PB3_MASK 128
 #define PB4_MASK 64
 #define PB5_MASK 128
+
+#define MAX_CHARS 80
+#define MAX_FIELDS 6
+#define delay4Cycles() __asm(" NOP\n NOP\n NOP\n NOP")
+
+char str[MAX_CHARS+1];
+uint8_t pos[MAX_FIELDS];
+uint8_t argCount=0;
 
 //-----------------------------------------------------------------------------
 // RTOS Defines and Kernel Variables
@@ -119,6 +124,64 @@ struct _tcb
     char name[16];                 // name of task used in ps command
     void *semaphore;               // pointer to the semaphore that is blocking the thread
 } tcb[MAX_TASKS];
+
+
+
+
+
+
+// Blocking function that returns with serial data once the buffer is not empty
+char getcUart0()
+{
+    while (UART0_FR_R & UART_FR_RXFE);               // wait if uart0 rx fifo empty
+    return UART0_DR_R & 0xFF;                        // get character from fifo
+}
+
+
+// Blocking function that writes a serial character when the UART buffer is not full
+void putcUart0(char c)
+{
+    while (UART0_FR_R & UART_FR_TXFF);               // wait if uart0 tx fifo full
+    UART0_DR_R = c;                                  // write character to fifo
+}
+
+
+// Blocking function that writes a string when the UART buffer is not full
+void putsUart0(char*str)
+{
+    uint8_t i;
+    for (i = 0; i <strlen(str) ; i++)
+      putcUart0(str[i]);
+}
+
+void getString(char str[], uint8_t maxChars)
+{
+
+    char c; uint32_t count = 0;
+        Loop1:
+        c = getcUart0();
+          if(c == 8 | c == 127)
+            {
+                if(count>0){count--;goto Loop1;}
+                else{goto Loop1;}
+            }
+
+          if(c == 10 | c == 13){str[count] = 0x00; return;}
+          else
+            {
+                if(c>=32){str[count++] = c;}
+                else goto Loop1;
+            }
+
+            if(count == maxChars)
+            {
+                str[count] = 0x00;
+                putsUart0("You have exceeded the maximum characters, you typed\r\n");
+                return;
+             }
+            else goto Loop1;
+}
+
 
 
 
@@ -328,7 +391,8 @@ void svCallIsr()
     uint8_t N = (uint8_t)getSvcNo();
     //uint32_t* s = (uint32_t*)getR0();
     uint32_t* R0 = (uint32_t*)getR0();
-
+    s = (struct semaphore *)*R0;
+    uint8_t i;
 
     switch(N)
     {
@@ -343,7 +407,6 @@ void svCallIsr()
         break;
     case 3: // wait
 
-        s = (struct semaphore *)*R0;
         if(s->count>0)
         {
             s->count--;
@@ -352,10 +415,30 @@ void svCallIsr()
         {
             s->processQueue[semaphoreCount] = taskCurrent;
             tcb[taskCurrent].state = STATE_BLOCKED;
-            *semaphores = *s;
+            semaphoreCount++;
+//            set pointer to semaphore
         }
         NVIC_INT_CTRL_R = NVIC_INT_CTRL_PEND_SV;
         break;
+
+    case 4: //post
+        s->count++;
+        if(semaphoreCount>0)
+        {
+            tcb[s->processQueue[0]].state = STATE_READY;
+            //Remove from queue
+
+            for (i = 0; i < semaphoreCount; i++)
+                {
+                    s[i] = s[i + 1];
+                }
+
+            semaphoreCount--;
+            s->count--;
+
+        }
+
+
     }
 }
 
@@ -401,6 +484,30 @@ void initHw()
         // Configure Push Buttons 4-5 ON PD6 AND PD7
         GPIO_PORTD_DEN_R |= PB4_MASK | PB5_MASK; // enable push buttons
         GPIO_PORTD_PUR_R |= PB4_MASK | PB5_MASK; // enable internal pull-up for push button
+
+
+        // UART Interface:
+        //   U0TX (PA1) and U0RX (PA0) are connected to the 2nd controller
+        //   The USB on the 2nd controller enumerates to an ICDI interface and a virtual COM port
+        //   Configured to 115,200 baud, 8N1
+
+        // Configure UART0 pins
+           GPIO_PORTA_DIR_R |= 2;                           // enable output on UART0 TX pin: default, added for clarity
+           GPIO_PORTA_DEN_R |= 3;                           // enable digital on UART0 pins: default, added for clarity
+           GPIO_PORTA_AFSEL_R |= 3;                         // use peripheral to drive PA0, PA1: default, added for clarity
+           GPIO_PORTA_PCTL_R &= 0xFFFFFF00;                 // set fields for PA0 and PA1 to zero
+           GPIO_PORTA_PCTL_R |= GPIO_PCTL_PA1_U0TX | GPIO_PCTL_PA0_U0RX;
+                                                            // select UART0 to drive pins PA0 and PA1: default, added for clarity
+
+           // Configure UART0 to 115200 baud, 8N1 format
+           SYSCTL_RCGCUART_R |= SYSCTL_RCGCUART_R0;         // turn-on UART0, leave other UARTs in same status
+           delay4Cycles();                                  // wait 4 clock cycles
+           UART0_CTL_R = 0;                                 // turn-off UART0 to allow safe programming
+           UART0_CC_R = UART_CC_CS_SYSCLK;                  // use system clock (40 MHz)
+           UART0_IBRD_R = 21;                               // r = 40 MHz / (Nx115.2kHz), set floor(r)=21, where N=16
+           UART0_FBRD_R = 45;                               // round(fract(r)*64)=45
+           UART0_LCRH_R = UART_LCRH_WLEN_8 | UART_LCRH_FEN; // configure for 8N1 w/ 16-level FIFO
+           UART0_CTL_R = UART_CTL_TXE | UART_CTL_RXE | UART_CTL_UARTEN;
 
 
         // Configure Timer 1 as the systickIsr
@@ -588,6 +695,15 @@ void shell()
 {
     while (true)
     {
+        if ( (UART0_FR_R & UART_FR_RXFE)==0 ) // if fifo is non-empty get the string
+        {
+            getString(str, MAX_CHARS);
+        }
+//        if ((UART0_FR_R & UART_FR_RXFE)==0)  // if fifo is non-empty print the string
+//        {
+//            putsUart0(str);
+//        }
+        yield();
     }
 }
 
@@ -602,6 +718,13 @@ int main(void)
     // Initialize hardware
     initHw();
     initRtos();
+
+    putcUart0(0x0a); putcUart0(0x0d);
+    putsUart0("Welcome to the shell interface");
+    putcUart0(0x0a); putcUart0(0x0d);
+    putsUart0("Please enter the command");
+    putcUart0(0x0a); putcUart0(0x0d);
+    putsUart0(">> ");
 
     // Power-up flash
     //GPIO_PORTE_DATA_R |= 1;
@@ -624,12 +747,12 @@ int main(void)
 
 //    ok &= createThread(lengthyFn, "LengthyFn", 12, 1024);
     ok &= createThread(flash4Hz, "Flash4Hz", 8, 1024);
-//    ok &= createThread(oneshot, "OneShot", 4, 1024);
+    ok &= createThread(oneshot, "OneShot", 4, 1024);
 //    ok &= createThread(readKeys, "ReadKeys", 12, 1024);
 //    ok &= createThread(debounce, "Debounce", 12, 1024);
 //    ok &= createThread(important, "Important", 0, 1024);
 //    ok &= createThread(uncooperative, "Uncoop", 10, 1024);
-//    ok &= createThread(shell, "Shell", 8, 1024);
+    ok &= createThread(shell, "Shell", 8, 1024);
 
 
     // Start up RTOS
