@@ -71,9 +71,18 @@
 #define MAX_FIELDS 6
 #define delay4Cycles() __asm(" NOP\n NOP\n NOP\n NOP")
 
+
+// Global Variables for string processing
+#define MAX_TASKS 12       // maximum number of valid tasks
+uint8_t taskCurrent = 0;   // index of last dispatched task
+uint8_t taskCount = 0;     // total number of valid tasks
+char str1[MAX_CHARS+1];
+char str2[MAX_CHARS+1];
+uint8_t count=0;
 char str[MAX_CHARS+1];
 uint8_t pos[MAX_FIELDS];
 uint8_t argCount=0;
+
 
 //-----------------------------------------------------------------------------
 // RTOS Defines and Kernel Variables
@@ -94,7 +103,7 @@ struct semaphore
 } semaphores[MAX_SEMAPHORES];
 uint8_t semaphoreCount = 0;
 
-struct semaphore *keyPressed, *keyReleased, *flashReq, *resource, *s;
+struct semaphore *keyPressed, *keyReleased, *flashReq, *resource;
 
 // task
 #define STATE_INVALID    0 // no task
@@ -103,9 +112,6 @@ struct semaphore *keyPressed, *keyReleased, *flashReq, *resource, *s;
 #define STATE_DELAYED    3 // has run, but now awaiting timer
 #define STATE_BLOCKED    4 // has run, but now blocked by semaphore
 
-#define MAX_TASKS 12       // maximum number of valid tasks
-uint8_t taskCurrent = 0;   // index of last dispatched task
-uint8_t taskCount = 0;     // total number of valid tasks
 
 // REQUIRED: add store and management for the memory used by the thread stacks
 //           thread stacks must start on 1 kiB boundaries so mpu can work correctly
@@ -127,13 +133,13 @@ struct _tcb
 
 
 
-
+void yield();
 
 
 // Blocking function that returns with serial data once the buffer is not empty
 char getcUart0()
 {
-    while (UART0_FR_R & UART_FR_RXFE);               // wait if uart0 rx fifo empty
+    while (UART0_FR_R & UART_FR_RXFE){yield();}               // wait if uart0 rx fifo empty
     return UART0_DR_R & 0xFF;                        // get character from fifo
 }
 
@@ -157,7 +163,7 @@ void putsUart0(char*str)
 void getString(char str[], uint8_t maxChars)
 {
 
-    char c; uint32_t count = 0;
+    char c; count = 0;
         Loop1:
         c = getcUart0();
           if(c == 8 | c == 127)
@@ -391,7 +397,7 @@ void svCallIsr()
     uint8_t N = (uint8_t)getSvcNo();
     //uint32_t* s = (uint32_t*)getR0();
     uint32_t* R0 = (uint32_t*)getR0();
-    s = (struct semaphore *)*R0;
+    struct semaphore * s = (struct semaphore *)*R0;
     uint8_t i;
 
     switch(N)
@@ -423,17 +429,16 @@ void svCallIsr()
 
     case 4: //post
         s->count++;
-        if(semaphoreCount>0)
+        if(s->queueSize>0)
         {
             tcb[s->processQueue[0]].state = STATE_READY;
             //Remove from queue
 
-            for (i = 0; i < semaphoreCount; i++)
+            for (i = 0; i < s->queueSize; i++)
                 {
                     s[i] = s[i + 1];
                 }
 
-            semaphoreCount--;
             s->count--;
 
         }
@@ -689,20 +694,77 @@ void important()
     }
 }
 
+void isCommand()
+{
+    uint8_t i =0;
+    if(strcmp(str1,"pidof")==0)
+    {
+        for(i=0;i<MAX_TASKS;i++)
+        {
+            if(strcmp(tcb[i].name,str2)==0){break;}
+        }
+        putcUart0(0x0a); putcUart0(0x0d);
+        putsUart0("PID of "); putsUart0(tcb[i].name); putsUart0(" is");
+    }
+
+    return;
+}
+
+
+void posArg(char*str)
+{
+    uint8_t i; argCount = 0;
+    for (i = 0; i < count; i++)
+    {
+        if(str[i]==32 | str[i]==44)
+        {
+            str[i]=0x00;
+        }
+        if(str[i]!=0x00 & str[i-1]==0x00)
+        {
+            pos[argCount] = i;
+            argCount++;
+        }
+
+    }
+    return;
+}
+
+void parseString(char* str,  uint8_t* pos, uint8_t argCount)
+{
+    uint8_t i; uint8_t tempCount=0;
+    for (i=pos[0];i<pos[1];i++)
+    {
+        if(str[i]==0){break;}
+        else str1[tempCount++] = str[i];
+    }
+
+    tempCount = 0;
+    for (i=pos[1];i<20;i++)
+    {
+        if(str[i]==0){break;}
+        else str2[tempCount++] = str[i];
+    }
+
+    return;
+}
+
+
 // REQUIRED: add processing for the shell commands through the UART here
 //           your solution should not use C library calls for strings, as the stack will be too large
 void shell()
 {
     while (true)
     {
-        if ( (UART0_FR_R & UART_FR_RXFE)==0 ) // if fifo is non-empty get the string
-        {
-            getString(str, MAX_CHARS);
-        }
-//        if ((UART0_FR_R & UART_FR_RXFE)==0)  // if fifo is non-empty print the string
-//        {
-//            putsUart0(str);
-//        }
+        putcUart0(0x0a); putcUart0(0x0d); putcUart0(0x0a); putcUart0(0x0d);
+        putsUart0("Please enter the command");
+        putcUart0(0x0a); putcUart0(0x0d); putsUart0(">>");
+        getString(str, MAX_CHARS);
+        posArg(str); // To process the string, calculate the no. of arguments and their positions
+        parseString(str,pos,argCount);
+//        putsUart0(str1); putsUart0("\n"); putsUart0("\r");
+//        putsUart0(str2); putsUart0("\n"); putsUart0("\r");
+        isCommand();
         yield();
     }
 }
@@ -719,12 +781,10 @@ int main(void)
     initHw();
     initRtos();
 
-    putcUart0(0x0a); putcUart0(0x0d);
-    putsUart0("Welcome to the shell interface");
-    putcUart0(0x0a); putcUart0(0x0d);
-    putsUart0("Please enter the command");
-    putcUart0(0x0a); putcUart0(0x0d);
-    putsUart0(">> ");
+    putcUart0(0x0a); putcUart0(0x0d); putcUart0(0x0a); putcUart0(0x0d);
+    putsUart0("Welcome to the shell interface"); putcUart0(0x0a); putcUart0(0x0d);
+//    putsUart0("Please enter the command");
+
 
     // Power-up flash
     //GPIO_PORTE_DATA_R |= 1;
