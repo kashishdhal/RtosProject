@@ -80,6 +80,7 @@ char str1[MAX_CHARS+1];
 char str2[MAX_CHARS+1];
 uint8_t count=0;
 char str[MAX_CHARS+1];
+char intStr[10];
 uint8_t pos[MAX_FIELDS];
 uint8_t argCount=0;
 
@@ -130,6 +131,10 @@ struct _tcb
     char name[16];                 // name of task used in ps command
     void *semaphore;               // pointer to the semaphore that is blocking the thread
 } tcb[MAX_TASKS];
+
+
+
+void printline(){putsUart0("\r\n----------------------------------------------------------------\r\n");}
 
 
 
@@ -694,9 +699,29 @@ void important()
     }
 }
 
+
+void intToStr(char*intStr, uint32_t number)
+{
+    uint32_t i; uint32_t divider=1;
+    for(i=0; i<10;i++)
+    {
+        divider = divider*10;
+        if((uint32_t)(number/divider)<1)
+            break;
+    }
+    uint8_t j; divider=1;
+    for(j=0; j<=i;j++)
+        {
+            divider=divider*10;
+            intStr[i-j]=(uint8_t)( 0x30 + (number%divider)/(divider/10) );
+        }
+    intStr[i+1] = 0x00;
+    return;
+}
+
 void isCommand()
 {
-    uint8_t i =0;
+    uint8_t i =0; uint8_t j=0;
     if(strcmp(str1,"pidof")==0)
     {
         for(i=0;i<MAX_TASKS;i++)
@@ -704,7 +729,62 @@ void isCommand()
             if(strcmp(tcb[i].name,str2)==0){break;}
         }
         putcUart0(0x0a); putcUart0(0x0d);
-        putsUart0("PID of "); putsUart0(tcb[i].name); putsUart0(" is");
+        uint8_t j;
+        for(j=0;j<10;j++)
+            intStr[j]=0;
+
+        putsUart0("PID of "); putsUart0(tcb[i].name); putsUart0(" is ");
+        intToStr(intStr,tcb[i].pid);
+        putsUart0(intStr);
+    }
+
+    if(strcmp(str1,"ps")==0)
+    {
+        printline();
+        putsUart0("PID   |  Name     |   Priority  |    State    |  % CPU Usage");
+        printline();
+        for(i=0;i<taskCount;i++)
+        {
+            for(j=0;j<10;j++){intStr[j]=0;}
+            intToStr(intStr,tcb[i].pid);
+            putsUart0(intStr); putsUart0("     ");
+            putsUart0(tcb[i].name);
+
+            uint8_t k=strlen(tcb[i].name);
+            while(15-k>0)
+            {
+                putsUart0(" ");
+                k++;
+            }
+
+
+            for(j=0;j<10;j++){intStr[j]=0;}
+            intToStr(intStr,tcb[i].priority);
+            putsUart0(intStr);
+
+            k=strlen(intStr);
+            while(12-k>0){putsUart0(" ");k++;}
+
+            if(tcb[i].state==0){putsUart0("INVALID");
+            k=strlen("INVALID");
+            while(18-k>0){putsUart0(" ");k++;}}
+            else if(tcb[i].state==1){putsUart0("UNRUN");k=strlen("UNRUN");
+            while(18-k>0){putsUart0(" ");k++;}}
+            else if(tcb[i].state==2){putsUart0("READY");k=strlen("READY");
+            while(18-k>0){putsUart0(" ");k++;}}
+            else if(tcb[i].state==3){putsUart0("DELAYED");k=strlen("DELAYED");
+            while(18-k>0){putsUart0(" ");k++;}}
+            else if(tcb[i].state==4){putsUart0("BLOCKED");k=strlen("BLOCKED");
+            while(18-k>0){putsUart0(" ");k++;}}
+
+
+
+            for(j=0;j<10;j++){intStr[j]=0;}
+            intToStr(intStr,100);
+            putsUart0(intStr); putsUart0("\n\r");
+
+        }
+        printline();
     }
 
     return;
@@ -714,6 +794,11 @@ void isCommand()
 void posArg(char*str)
 {
     uint8_t i; argCount = 0;
+
+    //empty out the argument position string
+    for (i=0;i<5;i++){pos[i]=0;}
+
+    // Here count is a global variable containing length of string
     for (i = 0; i < count; i++)
     {
         if(str[i]==32 | str[i]==44)
@@ -733,21 +818,31 @@ void posArg(char*str)
 void parseString(char* str,  uint8_t* pos, uint8_t argCount)
 {
     uint8_t i; uint8_t tempCount=0;
-    for (i=pos[0];i<pos[1];i++)
+
+    for(i=0;i<20;i++)
+    {
+        str1[i]=0; str2[i]=0;
+    }
+
+    for (i=pos[0];i<20;i++)
     {
         if(str[i]==0){break;}
         else str1[tempCount++] = str[i];
     }
 
+    if(pos[1]!=0)
+    {
     tempCount = 0;
     for (i=pos[1];i<20;i++)
     {
         if(str[i]==0){break;}
         else str2[tempCount++] = str[i];
     }
-
+    }
     return;
 }
+
+
 
 
 // REQUIRED: add processing for the shell commands through the UART here
@@ -782,7 +877,9 @@ int main(void)
     initRtos();
 
     putcUart0(0x0a); putcUart0(0x0d); putcUart0(0x0a); putcUart0(0x0d);
-    putsUart0("Welcome to the shell interface"); putcUart0(0x0a); putcUart0(0x0d);
+    printline();
+    putsUart0("//////  This is the shell interface  ///////");
+    printline();
 //    putsUart0("Please enter the command");
 
 
