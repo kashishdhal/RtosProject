@@ -83,7 +83,9 @@ char str[MAX_CHARS+1];
 char intStr[10];
 uint8_t pos[MAX_FIELDS];
 uint8_t argCount=0;
-
+uint32_t timerValue=0;
+uint8_t priorityScheduler=0;
+uint8_t priority=0;
 
 //-----------------------------------------------------------------------------
 // RTOS Defines and Kernel Variables
@@ -101,6 +103,7 @@ struct semaphore
     uint16_t count;
     uint16_t queueSize;
     uint32_t processQueue[MAX_QUEUE_SIZE]; // store task index here
+    char name[16];
 } semaphores[MAX_SEMAPHORES];
 uint8_t semaphoreCount = 0;
 
@@ -130,6 +133,9 @@ struct _tcb
     uint32_t ticks;                // ticks until sleep complete
     char name[16];                 // name of task used in ps command
     void *semaphore;               // pointer to the semaphore that is blocking the thread
+    uint32_t sum;
+    uint32_t startValue;
+    uint32_t stopValue;
 } tcb[MAX_TASKS];
 
 
@@ -217,16 +223,52 @@ void initRtos()
 // REQUIRED: Implement prioritization to 16 levels
 int rtosScheduler()
 {
+    uint8_t rollOver=0;
     bool ok;
     static uint8_t task = 0xFF;
     ok = false;
-    while (!ok)
+    if(!priorityScheduler)
     {
-        task++;
-        if (task >= MAX_TASKS)
-            task = 0;
-        ok = (tcb[task].state == STATE_READY || tcb[task].state == STATE_UNRUN);
+        while (!ok)
+        {
+            task++;
+            if (task >= MAX_TASKS)
+                task = 0;
+            ok = (tcb[task].state == STATE_READY || tcb[task].state == STATE_UNRUN);
+        }
     }
+    else
+    {
+        task=taskCurrent+1;
+        while(!ok)
+        {
+
+        if(tcb[task].priority==priority)
+        {
+             ok = (tcb[task].state == STATE_READY || tcb[task].state == STATE_UNRUN);
+             rollOver=0;
+             break;
+        }
+
+        if(task<MAX_TASKS)
+            task++;
+        else if (task==MAX_TASKS)
+            task=0;
+
+        rollOver++;
+
+        if(rollOver==MAX_TASKS & priority<15)
+            {rollOver=0;
+            priority++;}
+        else if (rollOver==MAX_TASKS & priority==15)
+        {
+            rollOver=0;
+            priority=0;
+        }
+        }
+
+        }
+
     return task;
 }
 
@@ -253,7 +295,7 @@ bool createThread(_fn fn, const char name[], uint8_t priority, uint32_t stackByt
             while (tcb[i].state != STATE_INVALID) {i++;}
             tcb[i].state = STATE_UNRUN;
             tcb[i].pid = fn;
-            tcb[i].sp = &stack[i][512];
+            tcb[i].sp = &stack[i+1][0];
             tcb[i].priority = priority;
             tcb[i].currentPriority = priority;
             strcpy(tcb[i].name,name);
@@ -270,26 +312,71 @@ bool createThread(_fn fn, const char name[], uint8_t priority, uint32_t stackByt
 // REQUIRED: modify this function to restart a thread
 void restartThread(_fn fn)
 {
+    uint8_t i;
+
+    for (i=0;i<taskCount;i++)
+    {
+        if(tcb[i].pid==fn)
+        {
+         tcb[i].sp = tcb[i].spInit;
+         tcb[i].state = STATE_UNRUN;
+         break;
+        }
+
+    }
 }
 
 // REQUIRED: modify this function to destroy a thread
 // REQUIRED: remove any pending semaphore waiting
 void destroyThread(_fn fn)
 {
+    uint8_t i;
+    for (i=0;i<taskCount;i++)
+    {
+        if(tcb[i].pid == fn)
+        {
+         struct semaphore * s = (struct semaphore *)tcb[i].semaphore;
+         if(tcb[i].state == STATE_BLOCKED & s!=0)
+         {
+
+         uint8_t j;
+         for (j = 0; j <= s->queueSize; j++)
+         {
+               s->processQueue[j] = s->processQueue[j+1];
+         }
+
+         s->queueSize--;
+         }
+         tcb[i].state = STATE_INVALID;
+         break;
+        }
+
+    }
 }
 
 // REQUIRED: modify this function to set a thread priority
 void setThreadPriority(_fn fn, uint8_t priority)
 {
+    uint8_t i;
+    for (i=0;i<taskCount;i++)
+    {
+        if(tcb[i].pid == fn)
+        {
+         tcb[i].priority = priority;
+         break;
+        }
+
+    }
 }
 
-struct semaphore* createSemaphore(uint8_t count)
+struct semaphore* createSemaphore(uint8_t count, char* str)
 {
     struct semaphore *pSemaphore = 0;
     if (semaphoreCount < MAX_SEMAPHORES)
     {
         pSemaphore = &semaphores[semaphoreCount++];
         pSemaphore->count = count;
+        strcpy(pSemaphore->name,str);
     }
     return pSemaphore;
 }
@@ -348,6 +435,7 @@ void post(struct semaphore *pSemaphore)
 // REQUIRED: in preemptive code, add code to request task switch
 void systickIsr()
 {
+    timerValue++;
     uint8_t i;
     for (i=0; i<taskCount;i++)
     {
@@ -370,8 +458,15 @@ void pendSvIsr()
 {
     pushReg();
     tcb[taskCurrent].sp = getPsp();
+
+    tcb[taskCurrent].stopValue = timerValue*1000;
+    tcb[taskCurrent].sum = ( 7*tcb[taskCurrent].sum + 1*(tcb[taskCurrent].stopValue - tcb[taskCurrent].startValue) )>>3;
+
     taskCurrent = rtosScheduler();
 
+    tcb[taskCurrent].startValue = timerValue*1000;
+
+    //start timer
     if (tcb[taskCurrent].state == STATE_READY)
        {
         setPsp(tcb[taskCurrent].sp);
@@ -418,16 +513,12 @@ void svCallIsr()
         break;
     case 3: // wait
 
-        if(s->count>0)
-        {
-            s->count--;
-        }
+        if(s->count>0){s->count--;}
         else
         {
-            s->processQueue[semaphoreCount] = taskCurrent;
+            s->processQueue[s->queueSize++] = taskCurrent;
             tcb[taskCurrent].state = STATE_BLOCKED;
-            semaphoreCount++;
-//            set pointer to semaphore
+            tcb[taskCurrent].semaphore = s;
         }
         NVIC_INT_CTRL_R = NVIC_INT_CTRL_PEND_SV;
         break;
@@ -437,13 +528,13 @@ void svCallIsr()
         if(s->queueSize>0)
         {
             tcb[s->processQueue[0]].state = STATE_READY;
-            //Remove from queue
+            tcb[s->processQueue[0]].semaphore = NULL;
 
             for (i = 0; i < s->queueSize; i++)
                 {
-                    s[i] = s[i + 1];
+                s->processQueue[i] = s->processQueue[i + 1];
                 }
-
+            s->queueSize--;
             s->count--;
 
         }
@@ -492,8 +583,10 @@ void initHw()
         GPIO_PORTC_PUR_R |= PB0_MASK | PB1_MASK | PB2_MASK | PB3_MASK; // enable internal pull-up for push button
 
         // Configure Push Buttons 4-5 ON PD6 AND PD7
-        GPIO_PORTD_DEN_R |= PB4_MASK | PB5_MASK; // enable push buttons
-        GPIO_PORTD_PUR_R |= PB4_MASK | PB5_MASK; // enable internal pull-up for push button
+        GPIO_PORTD_LOCK_R = GPIO_LOCK_KEY;
+        GPIO_PORTD_CR_R = 255;
+        GPIO_PORTD_DEN_R |=  PB4_MASK | PB5_MASK; // enable push buttons
+        GPIO_PORTD_PUR_R |=  PB4_MASK | PB5_MASK; // enable internal pull-up for push button
 
 
         // UART Interface:
@@ -526,7 +619,7 @@ void initHw()
         TIMER1_CTL_R &= ~TIMER_CTL_TAEN;                 // turn-off timer before reconfiguring
         TIMER1_CFG_R = TIMER_CFG_32_BIT_TIMER;           // configure as 32-bit timer (A+B)
         TIMER1_TAMR_R = TIMER_TAMR_TAMR_PERIOD;          // configure for periodic mode (count down)
-        TIMER1_TAILR_R = 40000;                       // set load value to 40e3 for 1 KHz interrupt rate
+        TIMER1_TAILR_R = 40000;                          // set load value to 40e3 for 1 KHz interrupt rate
         TIMER1_IMR_R = TIMER_IMR_TATOIM;                 // turn-on interrupts
         NVIC_EN0_R |= 1 << (INT_TIMER1A-16);             // turn-on interrupt 37 (TIMER1A)
         TIMER1_CTL_R |= TIMER_CTL_TAEN;                  // turn-on timer
@@ -536,7 +629,16 @@ void initHw()
 // REQUIRED: add code to return a value from 0-63 indicating which of 6 PBs are pressed
 uint8_t readPbs()
 {
-    return 0;
+    uint8_t pbValue=0;
+
+    if((PB0_MASK & GPIO_PORTC_DATA_R)==0){pbValue += 1;}
+    if((PB1_MASK & GPIO_PORTC_DATA_R)==0){pbValue += 2;}
+    if((PB2_MASK & GPIO_PORTC_DATA_R)==0){pbValue += 4;}
+    if((PB3_MASK & GPIO_PORTC_DATA_R)==0){pbValue += 8;}
+    if((PB4_MASK & GPIO_PORTD_DATA_R)==0){pbValue += 16;}
+    if((PB5_MASK & GPIO_PORTD_DATA_R)==0){pbValue += 32;}
+
+    return pbValue;
 }
 
 //-----------------------------------------------------------------------------
@@ -719,9 +821,28 @@ void intToStr(char*intStr, uint32_t number)
     return;
 }
 
+uint32_t StrToInt(char* str2)
+{
+    uint8_t i; uint32_t divider=1;
+        for(i=0; i<10;i++)
+        {
+            if(str2[i]<0x030 | str2[i]>0x039)
+                {i--; break;}
+        }
+
+    uint8_t j; divider=1; uint32_t number=0;
+    for(j=0;j<=i;j++)
+    {
+        number+=(uint8_t)(str2[i-j]-0x30)*divider;
+        divider=divider*10;
+    }
+
+    return number;
+}
+
 void isCommand()
 {
-    uint8_t i =0; uint8_t j=0;
+    uint8_t i =0; uint8_t j=0; uint8_t k=0;
     if(strcmp(str1,"pidof")==0)
     {
         for(i=0;i<MAX_TASKS;i++)
@@ -734,28 +855,29 @@ void isCommand()
             intStr[j]=0;
 
         putsUart0("PID of "); putsUart0(tcb[i].name); putsUart0(" is ");
-        intToStr(intStr,tcb[i].pid);
+        intToStr(intStr,(uint32_t)tcb[i].pid);
         putsUart0(intStr);
     }
 
-    if(strcmp(str1,"ps")==0)
+    else if(strcmp(str1,"ps")==0)
     {
         printline();
         putsUart0("PID   |  Name     |   Priority  |    State    |  % CPU Usage");
         printline();
+        uint32_t totalSum=0; uint32_t cpuPcntI=0; uint32_t cpuPcntF=0;
+        for(i=0;i<taskCount;i++)
+        {
+            totalSum += tcb[i].sum;
+        }
         for(i=0;i<taskCount;i++)
         {
             for(j=0;j<10;j++){intStr[j]=0;}
-            intToStr(intStr,tcb[i].pid);
+            intToStr(intStr,(uint32_t)tcb[i].pid);
             putsUart0(intStr); putsUart0("     ");
             putsUart0(tcb[i].name);
 
-            uint8_t k=strlen(tcb[i].name);
-            while(15-k>0)
-            {
-                putsUart0(" ");
-                k++;
-            }
+            k=strlen(tcb[i].name);
+            while(15-k>0){putsUart0(" ");k++;}
 
 
             for(j=0;j<10;j++){intStr[j]=0;}
@@ -768,24 +890,112 @@ void isCommand()
             if(tcb[i].state==0){putsUart0("INVALID");
             k=strlen("INVALID");
             while(18-k>0){putsUart0(" ");k++;}}
-            else if(tcb[i].state==1){putsUart0("UNRUN");k=strlen("UNRUN");
-            while(18-k>0){putsUart0(" ");k++;}}
-            else if(tcb[i].state==2){putsUart0("READY");k=strlen("READY");
-            while(18-k>0){putsUart0(" ");k++;}}
-            else if(tcb[i].state==3){putsUart0("DELAYED");k=strlen("DELAYED");
-            while(18-k>0){putsUart0(" ");k++;}}
-            else if(tcb[i].state==4){putsUart0("BLOCKED");k=strlen("BLOCKED");
-            while(18-k>0){putsUart0(" ");k++;}}
+            else if(tcb[i].state==1){putsUart0("UNRUN");
+            k=strlen("UNRUN"); while(18-k>0){putsUart0(" ");k++;}}
+            else if(tcb[i].state==2){putsUart0("READY");
+            k=strlen("READY"); while(18-k>0){putsUart0(" ");k++;}}
+            else if(tcb[i].state==3){putsUart0("DELAYED");
+            k=strlen("DELAYED"); while(18-k>0){putsUart0(" ");k++;}}
+            else if(tcb[i].state==4){putsUart0("BLOCKED");
+            k=strlen("BLOCKED"); while(18-k>0){putsUart0(" ");k++;}}
 
-
+            cpuPcntI = (uint32_t)((tcb[i].sum*100)/totalSum);
+            cpuPcntF = (uint32_t)((tcb[i].sum*10000)/totalSum) -cpuPcntI*100  ;
+            for(j=0;j<10;j++){intStr[j]=0;}
+            intToStr(intStr,cpuPcntI);
+            putsUart0(intStr); putsUart0(".");
 
             for(j=0;j<10;j++){intStr[j]=0;}
-            intToStr(intStr,100);
-            putsUart0(intStr); putsUart0("\n\r");
-
+            intToStr(intStr,cpuPcntF);
+            putsUart0(intStr);
+            putsUart0("\n\r");
         }
         printline();
     }
+
+    else if(strcmp(str1,"ipcs")==0)
+    {
+         printline();
+         putsUart0("  Name     |   Queue Size    |  Count");
+         printline();
+
+         for(i=0;i<semaphoreCount;i++)
+         {
+
+           putsUart0(semaphores[i].name);
+           k=strlen(semaphores[i].name); while(20-k>0){putsUart0(" ");k++;}
+
+           for(j=0;j<10;j++){intStr[j]=0;}
+           intToStr(intStr,semaphores[i].queueSize);
+           putsUart0(intStr);
+           k=strlen(intStr); while(15-k>0){putsUart0(" ");k++;}
+
+           for(j=0;j<10;j++){intStr[j]=0;}
+           intToStr(intStr,semaphores[i].count);
+           putsUart0(intStr); putsUart0("\n\r");
+
+         }
+
+         printline();
+    }
+
+
+    else if(strcmp(str1,"kill")==0)
+        {
+        uint32_t pid = StrToInt(str2);
+        _fn fn = (_fn)pid;
+        destroyThread(fn);
+
+        }
+
+    else if(strcmp(str2,"&")==0)
+    {
+        uint32_t pid = StrToInt(str1);
+        _fn fn = (_fn)pid;
+        restartThread(fn);
+    }
+
+    else if(strcmp(str1,"sched")==0)
+        {
+        if(strcmp(str2,"RR")==0)
+        {
+               priorityScheduler=0;
+        }
+        else if(strcmp(str2,"PRIO")==0)
+        {
+            priorityScheduler=1;
+        }
+        }
+
+    else if(strcmp(str1,"pi")==0)
+        {
+
+        if(strcmp(str2,"ON")==0)
+        {
+
+        }
+        else if(strcmp(str2,"OFF")==0)
+        {
+
+        }
+
+        }
+
+    else if(strcmp(str1,"preempt")==0)
+        {
+
+        if(strcmp(str2,"ON")==0)
+        {
+
+        }
+        else if(strcmp(str2,"OFF")==0)
+        {
+
+        }
+
+        }
+
+    else{putsUart0("Invalid Command");}
 
     return;
 }
@@ -843,10 +1053,6 @@ void parseString(char* str,  uint8_t* pos, uint8_t argCount)
 }
 
 
-
-
-// REQUIRED: add processing for the shell commands through the UART here
-//           your solution should not use C library calls for strings, as the stack will be too large
 void shell()
 {
     while (true)
@@ -857,8 +1063,6 @@ void shell()
         getString(str, MAX_CHARS);
         posArg(str); // To process the string, calculate the no. of arguments and their positions
         parseString(str,pos,argCount);
-//        putsUart0(str1); putsUart0("\n"); putsUart0("\r");
-//        putsUart0(str2); putsUart0("\n"); putsUart0("\r");
         isCommand();
         yield();
     }
@@ -891,10 +1095,10 @@ int main(void)
     waitMicrosecond(250000);
 
     // Initialize semaphores
-    keyPressed = createSemaphore(1);
-    keyReleased = createSemaphore(0);
-    flashReq = createSemaphore(5);
-    resource = createSemaphore(1);
+    keyPressed = createSemaphore(1,"keyPressed");
+    keyReleased = createSemaphore(0,"keyReleased");
+    flashReq = createSemaphore(5,"flashReq");
+    resource = createSemaphore(1,"resource");
 
     // Add required idle process at lowest priority
     ok =  createThread(idle, "Idle", 15, 1024);
@@ -902,13 +1106,13 @@ int main(void)
 
     // Add other processes
 
-//    ok &= createThread(lengthyFn, "LengthyFn", 12, 1024);
+    ok &= createThread(lengthyFn, "LengthyFn", 12, 1024);
     ok &= createThread(flash4Hz, "Flash4Hz", 8, 1024);
     ok &= createThread(oneshot, "OneShot", 4, 1024);
-//    ok &= createThread(readKeys, "ReadKeys", 12, 1024);
-//    ok &= createThread(debounce, "Debounce", 12, 1024);
-//    ok &= createThread(important, "Important", 0, 1024);
-//    ok &= createThread(uncooperative, "Uncoop", 10, 1024);
+    ok &= createThread(readKeys, "ReadKeys", 12, 1024);
+    ok &= createThread(debounce, "Debounce", 12, 1024);
+    ok &= createThread(important, "Important", 0, 1024);
+    ok &= createThread(uncooperative, "Uncoop", 10, 1024);
     ok &= createThread(shell, "Shell", 8, 1024);
 
 
