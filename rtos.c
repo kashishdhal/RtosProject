@@ -754,19 +754,6 @@ void partOfLengthyFn()
 {
     // represent some lengthy operation
     waitMicrosecond(990);
-//    __asm("             MOV  R3, #990");          // 1
-//    __asm("WMS_LOOP10:   MOV  R1, #6");          // 1
-//    __asm("WMS_LOOP11:   SUB  R1, #1");          // 6
-//    __asm("             CBZ  R1, WMS_DONE11");   // 5+1*3
-//    __asm("             NOP");                  // 5
-//    __asm("             NOP");                  // 5
-//    __asm("             B    WMS_LOOP11");       // 5*2 (speculative, so P=1)
-//    __asm("WMS_DONE11:   SUB  R3, #1");          // 1
-//    __asm("             CBZ  R3, WMS_DONE10");   // 1
-//    __asm("             NOP");                  // 1
-//    __asm("             B    WMS_LOOP10");       // 1*2 (speculative, so P=1)
-//    __asm("WMS_DONE10:");                        // ---
-//                                                // 40 clocks/us + error
     // give another process a chance to run
     yield();
 }
