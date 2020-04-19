@@ -83,9 +83,10 @@ char str[MAX_CHARS+1];
 char intStr[10];
 uint8_t pos[MAX_FIELDS];
 uint8_t argCount=0;
-uint32_t timerValue=0;
-uint8_t priorityScheduler=0;
-uint8_t priority=0;
+uint8_t priorityScheduler=1;
+uint8_t firstTime=1;
+uint8_t preempt = 0; // Note this is not working perfectly so I have set it to 0. For default behavior (for project), set it to 1
+uint8_t pi = 1;
 
 //-----------------------------------------------------------------------------
 // RTOS Defines and Kernel Variables
@@ -104,6 +105,7 @@ struct semaphore
     uint16_t queueSize;
     uint32_t processQueue[MAX_QUEUE_SIZE]; // store task index here
     char name[16];
+    uint16_t previousUser;
 } semaphores[MAX_SEMAPHORES];
 uint8_t semaphoreCount = 0;
 
@@ -120,7 +122,7 @@ struct semaphore *keyPressed, *keyReleased, *flashReq, *resource;
 // REQUIRED: add store and management for the memory used by the thread stacks
 //           thread stacks must start on 1 kiB boundaries so mpu can work correctly
 
-uint32_t stack[MAX_TASKS][511];
+uint32_t stack[MAX_TASKS][512];
 
 struct _tcb
 {
@@ -134,8 +136,8 @@ struct _tcb
     char name[16];                 // name of task used in ps command
     void *semaphore;               // pointer to the semaphore that is blocking the thread
     uint32_t sum;
-    uint32_t startValue;
     uint32_t stopValue;
+    uint32_t status;
 } tcb[MAX_TASKS];
 
 
@@ -223,7 +225,7 @@ void initRtos()
 // REQUIRED: Implement prioritization to 16 levels
 int rtosScheduler()
 {
-    uint8_t rollOver=0;
+    uint8_t task1; uint8_t priority=0;
     bool ok;
     static uint8_t task = 0xFF;
     ok = false;
@@ -236,40 +238,48 @@ int rtosScheduler()
                 task = 0;
             ok = (tcb[task].state == STATE_READY || tcb[task].state == STATE_UNRUN);
         }
+        return task;
     }
     else
     {
-        task=taskCurrent+1;
+        if(firstTime || taskCurrent==taskCount-1)
+        {
+            task1=0;
+            firstTime=0;
+        }
+        else
+            task1=taskCurrent+1;
         while(!ok)
         {
 
-        if(tcb[task].priority==priority)
-        {
-             ok = (tcb[task].state == STATE_READY || tcb[task].state == STATE_UNRUN);
-             rollOver=0;
-             break;
+            if(tcb[task1].currentPriority==priority)// && task1!=taskCurrent)
+            {
+                 ok = (tcb[task1].state == STATE_READY || tcb[task1].state == STATE_UNRUN);
+                 if(ok)
+                 {
+                    break;
+                 }  //dispatch the task
+            }
+
+            if((taskCurrent-task1)==0)
+            {
+                if(priority<15)
+                    priority++;
+                else if (priority==15)
+                    priority=0;
+            }
+
+            if(task1<taskCount-1)
+                task1++;
+            else if (task1==(taskCount-1))
+                task1=0;
+
+
+        }
+        return task1;
         }
 
-        if(task<MAX_TASKS)
-            task++;
-        else if (task==MAX_TASKS)
-            task=0;
 
-        rollOver++;
-
-        if(rollOver==MAX_TASKS & priority<15)
-            {rollOver=0;
-            priority++;}
-        else if (rollOver==MAX_TASKS & priority==15)
-        {
-            rollOver=0;
-            priority=0;
-        }
-        }
-
-        }
-
-    return task;
 }
 
 bool createThread(_fn fn, const char name[], uint8_t priority, uint32_t stackBytes)
@@ -296,6 +306,7 @@ bool createThread(_fn fn, const char name[], uint8_t priority, uint32_t stackByt
             tcb[i].state = STATE_UNRUN;
             tcb[i].pid = fn;
             tcb[i].sp = &stack[i+1][0];
+            tcb[i].spInit = &stack[i+1][0];
             tcb[i].priority = priority;
             tcb[i].currentPriority = priority;
             strcpy(tcb[i].name,name);
@@ -312,46 +323,14 @@ bool createThread(_fn fn, const char name[], uint8_t priority, uint32_t stackByt
 // REQUIRED: modify this function to restart a thread
 void restartThread(_fn fn)
 {
-    uint8_t i;
-
-    for (i=0;i<taskCount;i++)
-    {
-        if(tcb[i].pid==fn)
-        {
-         tcb[i].sp = tcb[i].spInit;
-         tcb[i].state = STATE_UNRUN;
-         break;
-        }
-
-    }
+    __asm("   SVC #5");
 }
 
 // REQUIRED: modify this function to destroy a thread
 // REQUIRED: remove any pending semaphore waiting
 void destroyThread(_fn fn)
 {
-    uint8_t i;
-    for (i=0;i<taskCount;i++)
-    {
-        if(tcb[i].pid == fn)
-        {
-         struct semaphore * s = (struct semaphore *)tcb[i].semaphore;
-         if(tcb[i].state == STATE_BLOCKED & s!=0)
-         {
-
-         uint8_t j;
-         for (j = 0; j <= s->queueSize; j++)
-         {
-               s->processQueue[j] = s->processQueue[j+1];
-         }
-
-         s->queueSize--;
-         }
-         tcb[i].state = STATE_INVALID;
-         break;
-        }
-
-    }
+    __asm("   SVC #6");
 }
 
 // REQUIRED: modify this function to set a thread priority
@@ -383,22 +362,26 @@ struct semaphore* createSemaphore(uint8_t count, char* str)
 
 extern void setSp(uint32_t sp);
 extern void setPsp(uint32_t *);
-extern void turnPspOn();
+extern void turnPspOn(uint32_t *);
 extern void pushReg();
 extern void popReg();
 extern uint32_t* getPsp();
 extern uint32_t getSvcNo();
 extern uint32_t getR0();
+extern void setLr();
 
 
 
 // REQUIRED: modify this function to start the operating system, using all created tasks
 void startRtos()
 {
-    turnPspOn();
+
     taskCurrent = rtosScheduler();
-    setPsp(tcb[taskCurrent].sp);
-    _fn fn = (_fn)tcb[taskCurrent].pid;
+    tcb[taskCurrent].state=STATE_READY;
+    NVIC_ST_CTRL_R |= (1+2+4);                    //  set 0th, 1st and 2nd bit of Control Register
+    turnPspOn((uint32_t *)tcb[taskCurrent].sp);
+//    setPsp((uint32_t *)tcb[taskCurrent].sp);
+    _fn fn = (_fn)(tcb[taskCurrent].pid);
     (*fn)();
 }
 
@@ -435,7 +418,6 @@ void post(struct semaphore *pSemaphore)
 // REQUIRED: in preemptive code, add code to request task switch
 void systickIsr()
 {
-    timerValue++;
     uint8_t i;
     for (i=0; i<taskCount;i++)
     {
@@ -449,7 +431,11 @@ void systickIsr()
             }
 
     }
-    TIMER1_ICR_R = TIMER_ICR_TATOCINT;               // clear interrupt flag
+    if(preempt)
+    {
+        NVIC_INT_CTRL_R = NVIC_INT_CTRL_PEND_SV;
+    }
+
 }
 
 // REQUIRED: in coop and preemptive, modify this function to add support for task switching
@@ -459,30 +445,44 @@ void pendSvIsr()
     pushReg();
     tcb[taskCurrent].sp = getPsp();
 
-    tcb[taskCurrent].stopValue = timerValue*1000;
-    tcb[taskCurrent].sum = ( 7*tcb[taskCurrent].sum + 1*(tcb[taskCurrent].stopValue - tcb[taskCurrent].startValue) )>>3;
 
-    taskCurrent = rtosScheduler();
 
-    tcb[taskCurrent].startValue = timerValue*1000;
+    uint8_t i =0;
+    for(i=0;i<MAX_TASKS;i++)
+    {
+        if(i==taskCurrent)
+        {
+            tcb[i].stopValue =  TIMER1_TAV_R;
+            tcb[i].sum = ( 7*tcb[i].sum + tcb[i].stopValue  )>>3;
+        }
+        else
+       {
+            tcb[i].sum = 7*tcb[i].sum >> 3;
+       }
+    }
 
-    //start timer
+
+    taskCurrent = rtosScheduler(); // Dispatch the task
+
+    TIMER1_TAV_R = 0; // Reset the timer when the task is dispatched
+
+    setPsp(tcb[taskCurrent].sp);
+
     if (tcb[taskCurrent].state == STATE_READY)
        {
-        setPsp(tcb[taskCurrent].sp);
         popReg();
        }
     else
     {
         uint32_t *p = getPsp();
         p=p-1;
-        *p = (1<<24);
+        *p = (1<<24); // write 1 to 24th bit of xPSR
         p=p-1;
-        *p = (uint32_t)tcb[taskCurrent].pid;
+        *p = (uint32_t)tcb[taskCurrent].pid; // write to PC
         p = p-6;
-        tcb[taskCurrent].state = STATE_READY;
         setPsp(p);
-
+        tcb[taskCurrent].state = STATE_READY;
+      // setLr();
     }
 
 
@@ -498,6 +498,7 @@ void svCallIsr()
     //uint32_t* s = (uint32_t*)getR0();
     uint32_t* R0 = (uint32_t*)getR0();
     struct semaphore * s = (struct semaphore *)*R0;
+    _fn fn;
     uint8_t i;
 
     switch(N)
@@ -512,17 +513,20 @@ void svCallIsr()
         NVIC_INT_CTRL_R = NVIC_INT_CTRL_PEND_SV;
         break;
     case 3: // wait
-
         if(s->count>0){s->count--;}
         else
         {
             s->processQueue[s->queueSize++] = taskCurrent;
             tcb[taskCurrent].state = STATE_BLOCKED;
             tcb[taskCurrent].semaphore = s;
+            if(pi==1 && tcb[taskCurrent].state==STATE_BLOCKED && tcb[s->previousUser].priority<tcb[taskCurrent].priority)
+            {
+                tcb[taskCurrent].currentPriority = 0;
+            }
+            NVIC_INT_CTRL_R = NVIC_INT_CTRL_PEND_SV;
         }
-        NVIC_INT_CTRL_R = NVIC_INT_CTRL_PEND_SV;
+        s->previousUser = taskCurrent;
         break;
-
     case 4: //post
         s->count++;
         if(s->queueSize>0)
@@ -538,8 +542,51 @@ void svCallIsr()
             s->count--;
 
         }
+        if(pi==1)
+        {
+            tcb[taskCurrent].currentPriority = tcb[taskCurrent].priority;
+        }
+        break;
+    case 5: //restartThread
+        fn = (_fn)*R0;
+        for (i=0;i<taskCount;i++)
+        {
+            if(tcb[i].pid==fn && tcb[i].state==STATE_INVALID)
+            {
+             tcb[i].sp = tcb[i].spInit;
+             tcb[i].state = STATE_UNRUN;
+             break;
+            }
+        }
+        break;
+    case 6: //killThread
+        fn = (_fn)*R0;
+        for (i=0;i<taskCount;i++)
+            {
+                if(tcb[i].pid == fn)
+                {
+                 struct semaphore * s = (struct semaphore *)tcb[i].semaphore;
+                 if(tcb[i].state == STATE_BLOCKED && s!=0)
+                 {
 
+                 uint8_t j;
+                 for (j = 0; j <= s->queueSize; j++)
+                 {
+                       s->processQueue[j] = s->processQueue[j+1];
+                 }
 
+                 s->queueSize--;
+                 }
+                 tcb[i].state = STATE_INVALID;
+                 break;
+                }
+
+            }
+    case 7: // PI OFF
+        for(i=0;i<MAX_TASKS;i++)
+        {
+            tcb[i].currentPriority = tcb[i].priority;
+        }
     }
 }
 
@@ -618,12 +665,19 @@ void initHw()
         SYSCTL_RCGCTIMER_R |= SYSCTL_RCGCTIMER_R1; // Enable clocks
         TIMER1_CTL_R &= ~TIMER_CTL_TAEN;                 // turn-off timer before reconfiguring
         TIMER1_CFG_R = TIMER_CFG_32_BIT_TIMER;           // configure as 32-bit timer (A+B)
-        TIMER1_TAMR_R = TIMER_TAMR_TAMR_PERIOD;          // configure for periodic mode (count down)
-        TIMER1_TAILR_R = 40000;                          // set load value to 40e3 for 1 KHz interrupt rate
-        TIMER1_IMR_R = TIMER_IMR_TATOIM;                 // turn-on interrupts
-        NVIC_EN0_R |= 1 << (INT_TIMER1A-16);             // turn-on interrupt 37 (TIMER1A)
-        TIMER1_CTL_R |= TIMER_CTL_TAEN;                  // turn-on timer
+        TIMER1_TAMR_R =  TIMER_TAMR_TACDIR; //  count up // TIMER_TAMR_TAMR_CAP |
+        TIMER1_TAILR_R = 40e6;                          // set load value to 40e3 for 1 KHz interrupt rate
+        TIMER1_IMR_R = 0;                                 // turn-off interrupts
+        TIMER1_TAV_R = 0;                               // zero counter for first period
+        TIMER1_CTL_R |= TIMER_CTL_TAEN;                  // turn-on counter
+        NVIC_EN0_R &= ~(1 << (INT_TIMER1A-16));           // turn-off interrupt 37 (TIMER1A)
 
+
+           // Configure the systickIsr
+
+          NVIC_ST_RELOAD_R = 40000-1;                   // set load value to 40e3-1 clocks for 1 KHz interrupt rate
+          NVIC_ST_CURRENT_R = 0;                        // Write any value to 0-23 bits of Current Register to enable the interrupt
+//          NVIC_ST_CTRL_R |= (1+2+4);                    //  set 0th, 1st and 2nd bit of Control Register
 }
 
 // REQUIRED: add code to return a value from 0-63 indicating which of 6 PBs are pressed
@@ -675,8 +729,6 @@ void idle2()
 
 }
 
-
-
 void flash4Hz()
 {
     while(true)
@@ -697,10 +749,24 @@ void oneshot()
     }
 }
 
+
 void partOfLengthyFn()
 {
     // represent some lengthy operation
     waitMicrosecond(990);
+//    __asm("             MOV  R3, #990");          // 1
+//    __asm("WMS_LOOP10:   MOV  R1, #6");          // 1
+//    __asm("WMS_LOOP11:   SUB  R1, #1");          // 6
+//    __asm("             CBZ  R1, WMS_DONE11");   // 5+1*3
+//    __asm("             NOP");                  // 5
+//    __asm("             NOP");                  // 5
+//    __asm("             B    WMS_LOOP11");       // 5*2 (speculative, so P=1)
+//    __asm("WMS_DONE11:   SUB  R3, #1");          // 1
+//    __asm("             CBZ  R3, WMS_DONE10");   // 1
+//    __asm("             NOP");                  // 1
+//    __asm("             B    WMS_LOOP10");       // 1*2 (speculative, so P=1)
+//    __asm("WMS_DONE10:");                        // ---
+//                                                // 40 clocks/us + error
     // give another process a chance to run
     yield();
 }
@@ -711,8 +777,10 @@ void lengthyFn()
     while(true)
     {
         wait(resource);
+        tcb[taskCurrent].status = 0;
         for (i = 0; i < 5000; i++)
         {
+            tcb[taskCurrent].status = i;
             partOfLengthyFn();
         }
         RED_LED ^= 1;
@@ -749,7 +817,7 @@ void readKeys()
         }
         if ((buttons & 8) != 0)
         {
-            destroyThread(flash4Hz);
+           destroyThread(flash4Hz);
         }
         if ((buttons & 16) != 0)
         {
@@ -910,6 +978,9 @@ void isCommand()
             putsUart0(intStr);
             putsUart0("\n\r");
         }
+        for(j=0;j<10;j++){intStr[j]=0;}
+        intToStr(intStr, (uint32_t)(tcb[1].status*100/5000));
+        putsUart0("\n\r"); putsUart0("Status of Lengthy is "); putsUart0(intStr); putsUart0("%\n\r");
         printline();
     }
 
@@ -950,8 +1021,13 @@ void isCommand()
 
     else if(strcmp(str2,"&")==0)
     {
-        uint32_t pid = StrToInt(str1);
-        _fn fn = (_fn)pid;
+
+        for(i=0;i<MAX_TASKS;i++)
+        {
+            if(strcmp(str1,tcb[i].name)==0)
+                break;
+        }
+        _fn fn = (_fn)tcb[i].pid;
         restartThread(fn);
     }
 
@@ -959,7 +1035,7 @@ void isCommand()
         {
         if(strcmp(str2,"RR")==0)
         {
-               priorityScheduler=0;
+            priorityScheduler=0;
         }
         else if(strcmp(str2,"PRIO")==0)
         {
@@ -972,11 +1048,13 @@ void isCommand()
 
         if(strcmp(str2,"ON")==0)
         {
-
+            pi = 1;
         }
         else if(strcmp(str2,"OFF")==0)
         {
-
+            __asm("   SVC #7");
+//            tcb[1].currentPriority= tcb[1].priority;
+            pi = 0;
         }
 
         }
@@ -986,14 +1064,28 @@ void isCommand()
 
         if(strcmp(str2,"ON")==0)
         {
-
+            preempt = 1;
         }
         else if(strcmp(str2,"OFF")==0)
         {
-
+            preempt = 0;
         }
 
         }
+    else if(strcmp("reboot", str1)==0 )
+            {
+                putsUart0("\r\nRebooting.......................");
+                NVIC_APINT_R = NVIC_APINT_VECTKEY| NVIC_APINT_SYSRESETREQ;
+            }
+
+    else if(strcmp("status", str1)==0 )
+        {
+            for(i=0;i<10;i++)
+                intStr[i] =0;
+             intToStr(intStr, tcb[1].status);
+             putsUart0("\n\r"); putsUart0(intStr);
+        }
+
 
     else{putsUart0("Invalid Command");}
 
@@ -1112,8 +1204,8 @@ int main(void)
     ok &= createThread(readKeys, "ReadKeys", 12, 1024);
     ok &= createThread(debounce, "Debounce", 12, 1024);
     ok &= createThread(important, "Important", 0, 1024);
-    ok &= createThread(uncooperative, "Uncoop", 10, 1024);
-    ok &= createThread(shell, "Shell", 8, 1024);
+    ok &= createThread(uncooperative, "Uncoop", 12, 1024);
+    ok &= createThread(shell, "Shell", 12, 1024);
 
 
     // Start up RTOS

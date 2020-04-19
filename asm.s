@@ -29,6 +29,7 @@
    .def getPsp
    .def getSvcNo
    .def getR0
+   .def setLr
 
 
 ;-----------------------------------------------------------------------------
@@ -52,12 +53,12 @@ setPsp:
                MSR    PSP, R0                ;
                BX     LR                     ; return from subroutine
 turnPspOn:
-			   MRS    R0, CONTROL
+			   MRS    R2, CONTROL
 			   MOV R1, #2
-			   ORR R1, R0, R1
+			   ORR R1, R2, R1
                MSR    CONTROL, R1
-               MRS SP, MSP
-               ISB	         ;
+               MSR    PSP, R0                ;
+               ;ISB
                BX     LR                     ; return from subroutine
 pushReg:
 	           MRS R0, PSP
@@ -79,7 +80,7 @@ pushReg:
 	           MSR PSP, R0
 	           BX LR
 popReg:
-	           MSR PSP,R0
+	           MRS R0, PSP
 	           LDR R11, [R0]
 	           ADD R0, R0, #4
 	           LDR R10, [R0]
@@ -112,4 +113,15 @@ getR0:
 			   MRS R0, PSP
 ;			   LDR R0, [R0]
 			   BX LR
+setLr:
+			  MOV R0, #0xFD
+			  MOV R1, #0XFF
+			  LSL R2, R1, #8
+			  LSL R3, R1, #16
+			  LSL R4, R1, #24
+			  ORR R0, R0, R2
+			  ORR R0, R0, R3
+			  ORR R0, R0, R4
+			  MOV LR, R0
+			  BX LR
 .endm
